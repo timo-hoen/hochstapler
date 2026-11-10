@@ -59,6 +59,7 @@ export const PHYS = {
   // Seil einholen: im Stand festhalten, während der Partner unter einem hängt oder unten steht
   reelSpeed: 1.7,   // so schnell holt man das Seil Hand über Hand ein (m/s)
   reelMin: 1.5,     // kürzer wird das Seil dabei nicht
+  climbSettle: 0.5, // nach dem Hochziehen über eine Kante so lange stehen bleiben (kein Überschießen)
 };
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -401,6 +402,8 @@ function climbOver(body, cols) {
   body.hang = null; body.jumpBuf = 0; body.braced = false;
   if (freeAt(up, cols)) {
     body.pos = up; body.grounded = true; body.ground = g.box; body.climbed = true;
+    body.vel[0] = body.vel[1] = body.vel[2] = 0;
+    body.settle = PHYS.climbSettle;
   } else { body.vel[1] = PHYS.jump * 0.6; body.gripCool = 0.3; }
 }
 
@@ -522,27 +525,46 @@ function pullHelper(body, box, world) {
   }
   return null;
 }
-// Kante greifen (auch aus dem Wasser): gegen eine Wand, deren Oberkante in Griffhöhe liegt
+// Kante greifen (auch aus dem Wasser): gegen eine Wand, deren Oberkante in Griffhöhe liegt.
+// Die Wand kann aus mehreren Boxen bestehen (gestapelte Kisten, Sockel, Kiste dahinter).
+// moveAxis meldet nur eine davon, oft die untere – darum alle Boxen an der Wandfläche prüfen
+// und die höchste greifbare Kante nehmen.
 function grabLedge(body, input, world, hx, hz) {
   if (body.gripCool > 0 || body.vel[1] >= 2) return;
+  const p = body.pos, h = PHYS.half[0];
+  let near = null;
   for (const [hit, ax] of [[hx, 0], [hz, 2]]) {
-    if (!hit || hit.mover || hit.ramp || hit.round || hit.blink || hit.nogrip) continue;
-    const rel = hit.max[1] - body.pos[1];
-    if (rel < PHYS.ledgeMin || rel > PHYS.pullMax) continue;
-    const s = (hit.min[ax] + hit.max[ax]) / 2 > body.pos[ax] ? 1 : -1;
+    if (!hit) continue;
+    const s = (hit.min[ax] + hit.max[ax]) / 2 > p[ax] ? 1 : -1;
     const n = ax === 0 ? [s, 0] : [0, s];
-    // Zu hoch zum Greifen? Hält oben ein Mitspieler fest, zieht er einen hoch.
-    const pulled = rel > PHYS.ledgeMax;
-    if (pulled && !pullHelper(body, hit, world)) continue;
     if (input.x * n[0] + input.z * n[1] < 0.3) continue;
-    const up = [body.pos[0] + n[0] * 0.55, hit.max[1] + EPS, body.pos[2] + n[1] * 0.55];
-    if (!freeAt(up, world.near(up, 2))) continue;
-    body.hang = { box: hit, n, top: hit.max[1], pulled };
-    body.pos[1] = hit.max[1] - PHYS.reach;
-    body.vel[0] = body.vel[1] = body.vel[2] = 0;
-    body.yaw = Math.atan2(n[0], n[1]);
-    body.jumpBuf = 0;
-    break;
+    const o = ax === 0 ? 2 : 0;
+    // world.near teilt sich ein Array: kopieren, freeAt fragt unten erneut ab
+    near = near || world.near(p, 2).slice();
+    const cands = [];
+    for (const b of near) {
+      if (b.mover || b.ramp || b.round || b.blink || b.nogrip || b.hidden) continue;
+      const rel = b.max[1] - p[1];
+      if (rel < PHYS.ledgeMin || rel > PHYS.pullMax) continue;
+      const gap = s > 0 ? b.min[ax] - (p[ax] + h) : (p[ax] - h) - b.max[ax];
+      if (gap < -0.05 || gap > 0.05) continue;
+      if (p[o] + h <= b.min[o] || p[o] - h >= b.max[o]) continue;
+      cands.push(b);
+    }
+    cands.sort((a, b) => b.max[1] - a.max[1]);
+    for (const b of cands) {
+      // Zu hoch zum Greifen? Hält oben ein Mitspieler fest, zieht er einen hoch.
+      const pulled = b.max[1] - p[1] > PHYS.ledgeMax;
+      if (pulled && !pullHelper(body, b, world)) continue;
+      const up = [p[0] + n[0] * 0.55, b.max[1] + EPS, p[2] + n[1] * 0.55];
+      if (!freeAt(up, world.near(up, 2))) continue;
+      body.hang = { box: b, n, top: b.max[1], pulled };
+      body.pos[1] = b.max[1] - PHYS.reach;
+      body.vel[0] = body.vel[1] = body.vel[2] = 0;
+      body.yaw = Math.atan2(n[0], n[1]);
+      body.jumpBuf = 0;
+      return;
+    }
   }
 }
 
@@ -557,6 +579,13 @@ export function stepBody(body, input, world, dt) {
   body.shoved = false;
   body.gripCool = Math.max(0, (body.gripCool || 0) - dt);
   body.hoisted = Math.max(0, (body.hoisted || 0) - dt);
+  // Gerade über eine Kante hochgezogen: kurz stehen bleiben, damit gehaltenes W oder ein
+  // Sprung nicht gleich wieder über die Plattform hinaus trägt (Festhalten geht weiter)
+  if (body.settle > 0) {
+    body.settle -= dt;
+    input = { ...input, x: 0, z: 0, jump: false };
+    body.jumpBuf = 0;
+  }
   if (input.jump) body.jumpBuf = PHYS.jumpBuffer;
   if (world.hazards.length) checkHazards(body, world, dt);
   const water = preStep(body, world, dt);
@@ -866,8 +895,9 @@ function hoistGrab(body, nx, nz, world) {
   const s = (ax === 0 ? nx : nz) > 0 ? 1 : -1;
   const o = ax === 0 ? 2 : 0;
   const p = body.pos, h = PHYS.half[0];
-  for (const b of world.near(p, 2)) {
-    if (b.mover || b.ramp || b.round || b.blink || b.nogrip) continue;
+  // Kopie: freeAt fragt world.near erneut ab (gemeinsames Array)
+  for (const b of world.near(p, 2).slice()) {
+    if (b.mover || b.ramp || b.round || b.blink || b.nogrip || b.hidden) continue;
     const rel = b.max[1] - p[1];
     if (rel < PHYS.ledgeMin || rel > PHYS.ledgeMax) continue;
     const gap = s > 0 ? b.min[ax] - (p[ax] + h) : (p[ax] - h) - b.max[ax];
