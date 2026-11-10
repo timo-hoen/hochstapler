@@ -6,7 +6,8 @@ import { Net } from './net.js';
 import { Input, PadInput, EMOTES, listPads, padClaims } from './input.js';
 import { Menu } from './menu.js';
 import { keysHtml, glyphify, xb } from './glyphs.js';
-import { ResetVote, VOTE_GRACE, voteWinner, newVoteId } from './vote.js';
+import { ResetVote, VOTE_GRACE, voteWinner, votesClash, newVoteId } from './vote.js';
+import { SaveState, SAVES_PER_ACT, actOfSection, saveSpotError } from './savepoint.js';
 import { LocalLobby, LOCAL_COLORS, MAX_LOCAL } from './lobby.js';
 import { settings } from './settings.js';
 import { audio } from './audio/index.js';
@@ -170,13 +171,16 @@ class Game {
     this.modeWish = modeWish.get();
     this.netReady = false; // Verbindung von Spieler 1 steht (oder ist endgültig offline)
     this.padPrev = new Map(); // Tastenzustand freier Controller (Einsteigen mitten im Spiel)
-    this.votes = new Map(); // laufende Abstimmungen „zurück zum Zwischenstopp“ (Kennung → ResetVote)
+    this.votes = new Map(); // laufende Abstimmungen „zurück zum Zwischenstopp“ / „Speicherpunkt“ (Kennung → ResetVote)
+    this.saves = [new SaveState(), new SaveState()]; // Speicher-Items: alle an einem Seil = [0], 2 gegen 2 je Team
 
     const p1 = this.newLocal(name, 0);
     $('hud-room').textContent = `RAUM ${room}`;
     // Offline-Fortschritt dieses Raums
     const saved = Number(store.get('hochstapler.cp.' + room) || 0);
-    if (saved > 0 && saved < this.level.checkpoints.length) { this.cp = saved; this.respawn(p1, false); }
+    try { this.saves[0].load(JSON.parse(store.get('hochstapler.save.' + room) || 'null')); } catch { /* kaputter Eintrag */ }
+    if (saved > 0 && saved < this.level.checkpoints.length) this.cp = saved;
+    if (this.cp > 0 || this.saves[0].active(this.cp)) this.respawn(p1, false);
     this.view.setCheckpointReached(this.cp);
 
     p1.net = this.net = new Net(solo ? null : room, name, {
@@ -236,6 +240,7 @@ class Game {
       pause: () => (this.paused ? this.resume() : this.pause()),
       emote: (i) => this.emote(i, lp),
       reset: () => this.requestReset(lp),
+      save: () => this.requestSave(lp),
     });
     lp.pad = pad;
     // Neben Spieler 1 auftauchen – steht der gerade nicht sicher, am Zwischenstopp
@@ -296,6 +301,8 @@ class Game {
       this.setLocalId(lp, m.you);
       if (this.mode === 'teams') { this.respawn(lp, false); this.refreshModeUi(); }
       else if (this.cp > (m.cp || 0)) lp.net.send({ t: 'cp', i: this.cp });
+    } else if (m.t === 'saveSync') {
+      this.applySave(m, lp);
     } else if (m.t === 'full') {
       this.toast(`Raum ist voll (max. 4) – ${lp.name} kann nicht mitspielen`);
       this.removeLocal(lp);
@@ -317,6 +324,10 @@ class Game {
         const others = m.players.filter((p) => !this.isLocal(p.id));
         for (const p of others) this.addRemote(p);
         this.mc.welcome(m);
+        // Speicher-Items liegen im Raum (gehen über Sitzungen mit)
+        this.saves[0].load(this.mode === 'teams' ? m.tsave?.[0] : m.save);
+        this.saves[1].load(this.mode === 'teams' ? m.tsave?.[1] : null);
+        this.storeSave();
         if (this.mode === 'teams') this.view.setCheckpointReached(this.cpOf(this.p1));
         else this.setCheckpoint(m.cp || 0, false);
         // Neben einem Mitspieler (aus dem eigenen Team) starten, sonst am Zwischenstopp
@@ -403,6 +414,7 @@ class Game {
         if (this.mode === 'teams' && m.team !== undefined) {
           if (m.i <= this.tcp[m.team]) break;
           this.tcp[m.team] = m.i;
+          this.saves[m.team]?.passed(m.i);
           // Eigenes Team (auch ein lokaler Mitspieler) oder Gegner?
           if (this.locals.some((l) => l.team === m.team)) {
             if (m.team === this.p1.team) this.view.setCheckpointReached(m.i);
@@ -417,7 +429,7 @@ class Game {
         const hit = this.locals.filter((lp) => this.mode !== 'teams' || m.team === undefined || lp.team === m.team);
         this.closeVotes((v) => this.mode !== 'teams' || m.team === undefined || v.team === m.team);
         if (!hit.length) break;
-        this.toast(`${m.name}: alle einverstanden – zurück zum ${this.cpLabel(this.cpOf(hit[0]))}`);
+        this.toast(`${m.name}: alle einverstanden – zurück zum ${this.spawnLabel(hit[0])}`);
         for (const lp of hit) this.respawn(lp, false);
         this.awaitWarp((r) => this.mode !== 'teams' || m.team === undefined || r.team === m.team);
         break;
@@ -425,8 +437,13 @@ class Game {
       case 'vote':
         this.onVote(m);
         break;
+      case 'save':
+      case 'saveSync':
+        this.applySave(m, null);
+        break;
       case 'restart':
         if (m.race) { this.race = m.race; this.tcp = [0, 0]; } else { this.startedAt = m.startedAt; this.played = 0; }
+        this.clearSaves();
         this.setCheckpoint(0, false, true);
         this.mc.reset();
         for (const lp of this.locals) this.respawn(lp, true);
@@ -524,6 +541,9 @@ class Game {
     const t = m.teams || {};
     for (const lp of this.locals) if (t[lp.id] !== undefined) lp.team = t[lp.id];
     for (const r of this.remotes.values()) if (t[r.id] !== undefined) r.team = t[r.id];
+    // Speicher-Items: das Rennen beginnt ohne, zurück am Seil gilt wieder der Stand der Seilschaft
+    this.clearSaves(false);
+    if (this.mode !== 'teams') { this.saves[0].load(m.save); this.storeSave(); }
     this.finished = false;
     $('finish').classList.add('hidden');
     this.setInputEnabled(!this.paused);
@@ -586,6 +606,7 @@ class Game {
       pause: () => (this.paused ? this.resume() : this.pause()),
       emote: (i) => this.emote(i, this.p1),
       reset: () => this.requestReset(this.p1),
+      save: () => this.requestSave(this.p1),
       toast: (t) => this.toast(t),
       device: () => this.updateClickHint(),
     }, { pad });
@@ -618,6 +639,7 @@ class Game {
       this.net.send({ t: 'restart' });
       this.startedAt = Date.now() + (this.net.online ? this.net.offset : 0);
       this.played = 0;
+      this.clearSaves();
       this.setCheckpoint(0, false, true);
       this.mc.reset();
       for (const lp of this.locals) this.respawn(lp, true);
@@ -1142,7 +1164,7 @@ class Game {
     this.respawn(lp, false);
     audio.play('respawn');
     const n = this.locals.length > 1 ? `${lp.name} abgestürzt` : 'Abgestürzt';
-    this.toast(`${n} – zurück zum ${this.cpLabel(this.cpOf(lp))}`);
+    this.toast(`${n} – zurück zum ${this.spawnLabel(lp)}`);
   }
 
   splatStyle() {
@@ -1170,12 +1192,19 @@ class Game {
     this.mc?.leave(lp, true);
     lp.airTop = undefined;
     const cp = this.level.checkpoints[toStart ? 0 : this.cpOf(lp)];
-    const pos = [...cp.pos];
     const slot = lp.slot || 0;
-    const spread = cp.box ? Math.min(0.7, (cp.box.max[0] - cp.box.min[0]) / 2 - 0.4) : 1.8;
-    pos[0] += ((slot % 2) * 2 - 1) * spread * 0.8;
-    pos[2] += (slot < 2 ? -1 : 1) * spread * 0.6;
-    pos[1] += 0.2;
+    // Gesetzter Speicherpunkt (Speicher-Item) geht vor – bis zum nächsten Zwischenstopp
+    const sp = toStart ? null : this.activeSave(lp);
+    let pos;
+    if (sp) {
+      pos = slot === 0 ? [sp.pos[0], sp.pos[1] + 0.3, sp.pos[2]] : this.besideOf(sp.pos, slot);
+    } else {
+      pos = [...cp.pos];
+      const spread = cp.box ? Math.min(0.7, (cp.box.max[0] - cp.box.min[0]) / 2 - 0.4) : 1.8;
+      pos[0] += ((slot % 2) * 2 - 1) * spread * 0.8;
+      pos[2] += (slot < 2 ? -1 : 1) * spread * 0.6;
+      pos[1] += 0.2;
+    }
     lp.body.pos = pos;
     lp.body.vel = [0, 0, 0];
     lp.body.grounded = false;
@@ -1220,21 +1249,8 @@ class Game {
   requestReset(lp) {
     if (this.paused || this.finished || !this.locals.includes(lp)) return;
     const now = performance.now();
-    const open = [...this.votes.values()].find((v) => v.has(lp.id));
-    if (open) {
-      if (open.yes.has(lp.id)) {
-        if (now - (lp.voteNag || 0) > 1500) {
-          lp.voteNag = now;
-          this.toast(`Warte auf Zustimmung (${open.count}/${open.need.length})`);
-        }
-        return;
-      }
-      open.agree(lp.id);
-      this.voteNet(lp).send({ t: 'vote', op: 'yes', v: open.v });
-      audio.play('emote', { index: 2 });
-      this.checkVote(open);
-      return;
-    }
+    const open = [...this.votes.values()].find((v) => v.kind === 'reset' && v.has(lp.id));
+    if (open) { this.agreeVote(lp, open, now); return; }
     const group = this.resetGroup(lp);
     if (group.length < 2) { this.resetToSafe(lp); return; }
     if (now - (this.lastReset || 0) < 800) return;
@@ -1246,8 +1262,108 @@ class Game {
     this.checkVote(v);
   }
 
+  // Offene Abstimmung: zustimmen (oder, wer schon zugestimmt hat, an den Stand erinnern)
+  agreeVote(lp, open, now) {
+    if (open.yes.has(lp.id)) {
+      if (now - (lp.voteNag || 0) > 1500) {
+        lp.voteNag = now;
+        this.toast(`Warte auf Zustimmung (${open.count}/${open.need.length})`);
+      }
+      return;
+    }
+    open.agree(lp.id);
+    this.voteNet(lp).send({ t: 'vote', op: 'yes', v: open.v });
+    audio.play('emote', { index: 2 });
+    this.checkVote(open);
+  }
+
   voteNet(lp) {
     return lp.net?.online ? lp.net : this.net;
+  }
+
+  // ───── Speicher-Items (2 pro Akt) ─────
+  saveOf(lp) { return this.saves[this.mode === 'teams' ? lp.team ?? 0 : 0]; }
+
+  // Speicherpunkt, an dem lp gerade wieder einsteigt (null = Zwischenstopp)
+  activeSave(lp) {
+    const st = this.saveOf(lp);
+    return st.active(this.cpOf(lp)) ? st.pt : null;
+  }
+
+  spawnLabel(lp) {
+    return this.activeSave(lp) ? 'Speicherpunkt' : this.cpLabel(this.cpOf(lp));
+  }
+
+  storeSave() {
+    if (this.mode !== 'teams') store.set('hochstapler.save.' + this.room, JSON.stringify(this.saves[0].toJSON()));
+  }
+
+  clearSaves(persist = true) {
+    for (const st of this.saves) st.clear();
+    this.closeVotes((v) => v.kind === 'save');
+    if (persist) this.storeSave();
+  }
+
+  // Speicher-Taste (C / Steuerkreuz rechts / 💾): Speicherpunkt genau hier setzen.
+  // Allein sofort, in der Seilschaft erst, wenn alle zugestimmt haben.
+  requestSave(lp) {
+    if (this.paused || this.finished || !this.locals.includes(lp)) return;
+    const now = performance.now();
+    const open = [...this.votes.values()].find((v) => v.kind === 'save' && v.has(lp.id));
+    if (open) { this.agreeVote(lp, open, now); return; }
+    if (now - (lp.saveTry || 0) < 600) return;
+    lp.saveTry = now;
+    const b = lp.body;
+    const who = this.locals.length > 1 ? `${lp.name}: ` : '';
+    const cpY = this.level.checkpoints[this.cpOf(lp)].pos[1];
+    const err = lp.fly || lp.dead > 0 ? 'Gerade nicht' : saveSpotError(b, cpY, this.world);
+    if (err) { this.toast(`💾 ${who}${err}`); return; }
+    const act = actOfSection(this.level, sectionAtHeight(this.level, b.pos[1]));
+    const st = this.saveOf(lp);
+    if (st.left(act) <= 0) { this.toast(`💾 ${who}Keine Speicher-Items mehr in Akt ${act}`); return; }
+    const pos = [...b.pos];
+    const group = this.resetGroup(lp);
+    if (group.length < 2) { this.placeSave(lp, pos, act); return; }
+    const v = new ResetVote({ v: newVoteId(), by: lp.id, byName: lp.name, need: group.map((e) => e.id), team: lp.team ?? 0, now, kind: 'save', act, pos });
+    this.votes.set(v.v, v);
+    this.voteNet(lp).send({ t: 'vote', op: 'ask', v: v.v, need: v.need, k: 'save', a: act });
+    audio.play('emote', { index: 0 });
+    this.checkVote(v);
+  }
+
+  placeSave(lp, pos, act) {
+    const st = this.saveOf(lp);
+    const i = this.cpOf(lp);
+    if (!st.place({ pos, i, act })) { this.toast(`💾 Keine Speicher-Items mehr in Akt ${act}`); return false; }
+    this.storeSave();
+    this.voteNet(lp).send({ t: 'save', pos: st.pt.pos, i, act });
+    audio.play('save');
+    const many = this.resetGroup(lp).length > 1;
+    this.toast(`💾 Speicherpunkt gesetzt${many ? ' für die Seilschaft' : ''} – noch ${st.left(act)} in Akt ${act}`);
+    return true;
+  }
+
+  // Stand vom Raum: jemand hat ein Item benutzt (save) oder der Raum hat korrigiert (saveSync)
+  applySave(m, lp) {
+    const teams = this.mode === 'teams';
+    if (teams && m.team === undefined) return;
+    const t = teams ? m.team : 0;
+    const st = this.saves[t];
+    if (!st) return;
+    st.load(m.save);
+    st.passed(teams ? this.tcp[t] : this.cp);
+    this.storeSave();
+    const mine = this.locals.some((l) => !teams || l.team === t);
+    if (m.t === 'saveSync') {
+      if (mine) this.toast(`💾 ${lp ? lp.name + ': ' : ''}Keine Speicher-Items mehr in diesem Akt`);
+      return;
+    }
+    // Abstimmung dazu ist erledigt
+    this.closeVotes((v) => v.kind === 'save' && v.has(m.id));
+    if (mine && !this.isLocal(m.id) && st.pt) {
+      audio.play('save');
+      this.toast(`💾 ${m.name}: Speicherpunkt gesetzt – noch ${st.left(st.pt.act)} in Akt ${st.pt.act}`);
+    }
   }
 
   // Nachricht eines Mitspielers (oder eines eigenen lokalen Spielers über dessen Verbindung)
@@ -1257,9 +1373,9 @@ class Game {
     const now = performance.now();
     if (m.op === 'ask') {
       if (this.votes.has(m.v) || !Array.isArray(m.need)) return;
-      const v = new ResetVote({ v: m.v, by: m.id, byName: m.name || 'Jemand', need: m.need.filter((x) => typeof x === 'string'), team: m.team ?? 0, now });
+      const v = new ResetVote({ v: m.v, by: m.id, byName: m.name || 'Jemand', need: m.need.filter((x) => typeof x === 'string'), team: m.team ?? 0, now, kind: m.k, act: m.a || 1 });
       // Gleichzeitig gefragt? Überall gewinnt dieselbe Abstimmung, der andere Fragende stimmt ihr zu
-      const clash = [...this.votes.values()].find((o) => o.need.some((id) => v.has(id)));
+      const clash = [...this.votes.values()].find((o) => votesClash(o, v));
       if (clash) {
         const win = voteWinner(clash, v), lose = win === v ? clash : v;
         this.votes.delete(lose.v);
@@ -1280,7 +1396,7 @@ class Game {
       const v = this.votes.get(m.v);
       if (!v) return;
       this.votes.delete(m.v);
-      if (this.locals.some((l) => v.has(l.id))) this.toast(m.why === 'time' ? 'Nicht alle haben zugestimmt – kein Reset' : `${v.byName} hat die Abstimmung abgebrochen`);
+      if (this.locals.some((l) => v.has(l.id))) this.toast(m.why === 'time' ? `Nicht alle haben zugestimmt – ${v.kind === 'save' ? 'kein Speicherpunkt' : 'kein Reset'}` : `${v.byName} hat die Abstimmung abgebrochen`);
     }
   }
 
@@ -1290,7 +1406,8 @@ class Game {
     const by = this.locals.find((l) => l.id === v.by);
     if (by) {
       this.votes.delete(v.v);
-      this.resetToSafe(by, true);
+      if (v.kind === 'save') this.placeSave(by, v.pos, v.act);
+      else this.resetToSafe(by, true);
     } else {
       // Der Fragende sitzt woanders: sein Warp kommt gleich
       v.closing = true;
@@ -1319,7 +1436,7 @@ class Game {
       if (mine && now > v.until) {
         this.votes.delete(v.v);
         this.voteNet(mine).send({ t: 'vote', op: 'cancel', v: v.v, why: 'time' });
-        this.toast('Nicht alle haben zugestimmt – kein Reset');
+        this.toast(`Nicht alle haben zugestimmt – ${v.kind === 'save' ? 'kein Speicherpunkt' : 'kein Reset'}`);
       } else if (!mine && now > v.until + (v.closing ? 0 : VOTE_GRACE * 1000)) this.votes.delete(v.v);
     }
   }
@@ -1328,23 +1445,32 @@ class Game {
   updateVoteUi() {
     const el = $('vote');
     if (!el) return;
-    const v = [...this.votes.values()].find((x) => this.locals.some((l) => x.has(l.id)));
-    if (!v) { if (!el.classList.contains('hidden')) { el.classList.add('hidden'); el.dataset.key = ''; } return; }
+    const list = [...this.votes.values()].filter((x) => this.locals.some((l) => x.has(l.id)));
+    if (!list.length) { if (!el.classList.contains('hidden')) { el.classList.add('hidden'); el.dataset.key = ''; } return; }
     const now = performance.now();
     const names = new Map(this.everyone().map((e) => [e.id, e.local ? e.local.name : e.remote.name]));
-    const pending = this.locals.filter((l) => v.has(l.id) && !v.yes.has(l.id));
     const dev = document.body.dataset.device;
-    const keyOf = (l) => (l !== this.p1 || dev === 'pad' ? xb('View') : dev === 'touch' ? '<kbd>↺</kbd>' : '<kbd>R</kbd>');
-    const who = v.need.map((id) => `<span class="${v.yes.has(id) ? 'ok' : 'wait'}">${v.yes.has(id) ? '✓' : '…'} ${esc(names.get(id) || '?')}</span>`).join('');
-    const target = this.cpLabel(this.cpOf(this.locals.find((l) => v.has(l.id)) || this.p1));
-    let hint;
-    if (v.closing || v.done) hint = 'Alle einverstanden';
-    else if (pending.length === 1 && this.locals.length === 1) hint = `Zustimmen: ${keyOf(pending[0])}`;
-    else if (pending.length) hint = 'Zustimmen: ' + pending.map((l) => `${esc(l.name)} ${keyOf(l)}`).join(' · ');
-    else hint = `Warte auf die anderen · noch ${v.secondsLeft(now)} s`;
-    const html = `<div class="vote-title">↺ Zurück zum ${esc(target)}?</div>`
-      + `<div class="vote-sub">${esc(v.byName)} fragt · ${v.count}/${v.need.length}</div>`
-      + `<div class="vote-who">${who}</div><div class="vote-hint">${hint}</div>`;
+    const keyOf = (l, kind) => {
+      if (kind === 'save') return l !== this.p1 || dev === 'pad' ? xb('DRight') : dev === 'touch' ? '<kbd>💾</kbd>' : '<kbd>C</kbd>';
+      return l !== this.p1 || dev === 'pad' ? xb('View') : dev === 'touch' ? '<kbd>↺</kbd>' : '<kbd>R</kbd>';
+    };
+    const html = list.map((v) => {
+      const pending = this.locals.filter((l) => v.has(l.id) && !v.yes.has(l.id));
+      const who = v.need.map((id) => `<span class="${v.yes.has(id) ? 'ok' : 'wait'}">${v.yes.has(id) ? '✓' : '…'} ${esc(names.get(id) || '?')}</span>`).join('');
+      const lp = this.locals.find((l) => v.has(l.id)) || this.p1;
+      let hint;
+      if (v.closing || v.done) hint = 'Alle einverstanden';
+      else if (pending.length === 1 && this.locals.length === 1) hint = `Zustimmen: ${keyOf(pending[0], v.kind)}`;
+      else if (pending.length) hint = 'Zustimmen: ' + pending.map((l) => `${esc(l.name)} ${keyOf(l, v.kind)}`).join(' · ');
+      else hint = `Warte auf die anderen · noch ${v.secondsLeft(now)} s`;
+      const title = v.kind === 'save'
+        ? `💾 Speicherpunkt bei ${esc(v.byName)} setzen?`
+        : `↺ Zurück zum ${esc(this.spawnLabel(lp))}?`;
+      const extra = v.kind === 'save' ? ` · Item ${SAVES_PER_ACT - this.saveOf(lp).left(v.act) + 1}/${SAVES_PER_ACT} in Akt ${v.act}` : '';
+      return `<div class="vote-one"><div class="vote-title">${title}</div>`
+        + `<div class="vote-sub">${esc(v.byName)} fragt · ${v.count}/${v.need.length}${extra}</div>`
+        + `<div class="vote-who">${who}</div><div class="vote-hint">${hint}</div></div>`;
+    }).join('');
     if (el.dataset.key !== html) { el.innerHTML = html; el.dataset.key = html; }
     el.classList.remove('hidden');
   }
@@ -1364,7 +1490,7 @@ class Game {
       for (const e of chain) if (e.remote) e.remote.slack = 1.5;
     }
     audio.play('respawn');
-    const where = this.cpLabel(this.cpOf(lp));
+    const where = this.spawnLabel(lp);
     this.toast(chain.length > 1 ? `Alle einverstanden – die Seilschaft geht zum ${where}` : `Zurück zum ${where}`);
   }
 
@@ -1373,12 +1499,13 @@ class Game {
       // 2 gegen 2: Fortschritt des Teams dieses Spielers, nicht offline gemerkt
       const t = by.team ?? 0;
       if (!force && i <= this.tcp[t]) return;
-      if (force) this.tcp = [i, i]; else this.tcp[t] = i;
+      if (force) this.tcp = [i, i]; else { this.tcp[t] = i; this.saves[t].passed(i); }
       if (force || t === this.p1.team) this.view.setCheckpointReached(i);
     } else {
       if (!force && i <= this.cp) return;
       this.cp = i;
       store.set('hochstapler.cp.' + this.room, String(i));
+      if (!force) { this.saves[0].passed(i); this.storeSave(); }
       this.view.setCheckpointReached(i);
     }
     if (announce) {
@@ -1522,6 +1649,16 @@ class Game {
       $('hud-cp').textContent += ` · ${TEAMS[other].short}: ${this.tcp[other]}/${nCp}`;
     }
     $('hud-timer').textContent = `${this.mode === 'teams' ? 'Rennzeit' : 'Schichtzeit'} ${fmt(this.shiftTime())}`;
+    // Speicher-Items im Akt, in dem Spieler 1 gerade ist
+    const act = actOfSection(this.level, sectionAtHeight(this.level, Math.max(0, this.p1.body.pos[1])));
+    const left = this.saveOf(this.p1).left(act);
+    const dev = document.body.dataset.device;
+    const key = dev === 'pad' ? xb('DRight') : dev === 'touch' ? '' : '<kbd>C</kbd>';
+    const sp = this.activeSave(this.p1);
+    const saveHtml = `<span class="dots">${'●'.repeat(left)}<i>${'●'.repeat(SAVES_PER_ACT - left)}</i></span> Speicher-Items Akt ${act} ${key}${sp ? '<div class="on">Speicherpunkt aktiv</div>' : ''}`;
+    const hs = $('hud-save');
+    if (hs && hs.dataset.key !== saveHtml) { hs.innerHTML = saveHtml; hs.dataset.key = saveHtml; }
+    this.view.setSavePoint?.(sp ? sp.pos : null);
     if (this.view.scene.fog) this.view.scene.fog.color.setHex(s.fog);
 
     const single = this.locals.length === 1;

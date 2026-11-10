@@ -772,6 +772,28 @@ export class Renderer {
     this.cpReached = -1;
   }
 
+  // Speicherpunkt (Speicher-Item): leuchtende Bake genau dort, wo gespeichert wurde
+  setSavePoint(pos) {
+    if (!pos) { if (this.saveMark) this.saveMark.visible = false; return; }
+    if (!this.saveMark) {
+      const g = new THREE.Group();
+      const glow = new THREE.MeshStandardMaterial({ color: 0x1b5a6e, emissive: 0x4fd8ff, emissiveIntensity: 1.6 });
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 1.5, 8), this.mats.upright);
+      pole.position.y = 0.75;
+      const lamp = new THREE.Mesh(new THREE.OctahedronGeometry(0.17), glow);
+      lamp.position.y = 1.7;
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.34, 0.44, 28), new THREE.MeshBasicMaterial({ color: 0x4fd8ff, transparent: true, opacity: 0.7, side: THREE.DoubleSide }));
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = 0.03;
+      g.add(pole, lamp, ring);
+      this.saveLamp = lamp;
+      this.saveMark = g;
+      this.scene.add(g);
+    }
+    this.saveMark.visible = true;
+    this.saveMark.position.set(pos[0], pos[1], pos[2]);
+  }
+
   setCheckpointReached(i) {
     if (i === this.cpReached) return;
     this.cpReached = i;
@@ -938,6 +960,7 @@ export class Renderer {
     updateWind(this.windFx, dt, (z) => colliders.gust(z), focus);
     for (const f of this.fanBlades) f.rotation.y += dt * 12;
     if (this.flag) this.flag.rotation.y = Math.sin(performance.now() / 600) * 0.3;
+    if (this.saveLamp && this.saveMark.visible) { this.saveLamp.rotation.y += dt * 2; this.saveLamp.position.y = 1.7 + Math.sin(performance.now() / 500) * 0.06; }
     // Schattenkamera folgt dem Spieler, auf Texel gerastet gegen Flimmern
     const texel = 60 / this.sun.shadow.mapSize.x;
     const fx = Math.round(focus[0] / texel) * texel, fy = Math.round(focus[1] / texel) * texel, fz = Math.round(focus[2] / texel) * texel;

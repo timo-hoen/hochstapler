@@ -27,7 +27,7 @@ export function readPad(gp, prev, dt, enabled) {
   const b = (i) => !!gp.buttons[i]?.pressed;
   const v = (i) => gp.buttons[i]?.value || 0;
   const pressed = (i) => b(i) && !prev[i];
-  const out = { fx: 0, rx: 0, lookX: 0, lookY: 0, zoom: 0, jump: false, up: false, use: false, brace: false, emote: -1, pause: pressed(9), reset: pressed(8), any: false };
+  const out = { fx: 0, rx: 0, lookX: 0, lookY: 0, zoom: 0, jump: false, up: false, use: false, brace: false, emote: -1, pause: pressed(9), reset: pressed(8), save: false, any: false };
   const lx = deadzone(gp.axes[0] || 0), ly = deadzone(gp.axes[1] || 0);
   const rxs = deadzone(gp.axes[2] || 0), rys = deadzone(gp.axes[3] || 0);
   out.any = !!(lx || ly || rxs || rys || gp.buttons.some((x) => x.pressed));
@@ -44,6 +44,7 @@ export function readPad(gp, prev, dt, enabled) {
     if (pressed(14)) out.emote = 0;
     if (pressed(3)) out.emote = 1;
     if (pressed(4)) out.emote = 2;
+    out.save = pressed(15); // Steuerkreuz rechts: Speicher-Item
     if (b(12)) out.zoom -= 8 * dt;
     if (b(13)) out.zoom += 8 * dt;
   }
@@ -76,6 +77,7 @@ export class PadInput {
     this.prev = gp.buttons.map((x) => x.pressed);
     if (r.pause) this.h.pause?.();
     if (r.reset && this.enabled) this.h.reset?.();
+    if (r.save && this.enabled) this.h.save?.();
     if (r.emote >= 0) this.h.emote?.(r.emote);
     const len = Math.hypot(r.fx, r.rx);
     out.forward = len > 1 ? r.fx / len : r.fx;
@@ -131,6 +133,8 @@ export class Input {
       if (e.code === 'KeyG' && !e.repeat) this.useQueued = true;
       // R: zurück zum Zwischenstopp (im Koop als Abstimmung); Rücktaste/T wie früher
       if ((e.code === 'KeyR' || e.code === 'Backspace' || e.code === 'KeyT') && !e.repeat && this.enabled && e.target.tagName !== 'INPUT') { e.preventDefault(); this.h.reset?.(); }
+      // C: Speicher-Item – Speicherpunkt genau hier (im Koop als Abstimmung)
+      if (e.code === 'KeyC' && !e.repeat && this.enabled) this.h.save?.();
       this.keys.add(e.code);
       const em = { Digit1: 0, Digit2: 1, Digit3: 2 }[e.code];
       if (em !== undefined && !e.repeat) this.h.emote?.(em);
@@ -257,6 +261,8 @@ export class Input {
     hold(root.querySelector('[data-act=pause]'), () => this.h.pause?.());
     const rb = root.querySelector('[data-act=reset]');
     if (rb) hold(rb, () => { if (this.enabled) this.h.reset?.(); });
+    const sb = root.querySelector('[data-act=save]');
+    if (sb) hold(sb, () => { if (this.enabled) this.h.save?.(); });
     hold(root.querySelector('[data-act=zoomin]'), () => { this.zoom -= 1.6; });
     hold(root.querySelector('[data-act=zoomout]'), () => { this.zoom += 1.6; });
 
@@ -318,6 +324,7 @@ export class Input {
       if (r.any) this.setDevice('pad');
       if (r.pause) this.h.pause?.();
       if (r.reset && this.enabled) this.h.reset?.();
+      if (r.save && this.enabled) this.h.save?.();
       if (this.enabled) {
         rx += r.rx; fx += r.fx;
         this.lookX += r.lookX; this.lookY += r.lookY; this.zoom += r.zoom;
