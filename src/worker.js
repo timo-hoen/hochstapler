@@ -3,6 +3,7 @@
 // an genau ein Durable Object pro Raumcode weiter.
 import { DurableObject } from 'cloudflare:workers';
 import { hostOf, modeError, assignTeams, teamForNewcomer } from '../client/src/teams.js';
+import { SaveState, cleanSave } from '../client/src/savepoint.js';
 
 const MAX_PLAYERS = 4;
 const COLORS = ['#ff7a1a', '#22c8e5', '#9be22a', '#ff4fa3'];
@@ -149,6 +150,8 @@ export class Room extends DurableObject {
         const cp = (await this.ctx.storage.get('cp')) || 0;
         const board = (await this.ctx.storage.get('board')) || [];
         const flags = (await this.ctx.storage.get('flags')) || [];
+        const save = (await this.ctx.storage.get('save')) || null;
+        const tsave = (await this.ctx.storage.get('tsave')) || null;
 
         this.send(ws, {
           t: 'welcome',
@@ -163,6 +166,8 @@ export class Room extends DurableObject {
           race: ms.race,
           mach: this.machSnapshot(),
           flags,
+          save,
+          tsave,
           players: others.map((p) => ({ ...this.publicPlayer(p), s: this.lastState.get(p.id) || null })),
         });
         this.broadcast({ t: 'join', player: info }, ws);
@@ -268,11 +273,35 @@ export class Room extends DurableObject {
         if (!me.id) return;
         this.broadcast({ t: 'warp', name: me.name, team: me.team ?? 0 }, ws);
         return;
-      case 'vote': { // Abstimmung „zurück zum Zwischenstopp“: nur weiterreichen
+      case 'vote': { // Abstimmung „zurück zum Zwischenstopp“ / „Speicherpunkt setzen“: nur weiterreichen
         if (!me.id || !['ask', 'yes', 'cancel'].includes(m.op) || typeof m.v !== 'string') return;
         const out = { t: 'vote', op: m.op, v: m.v.slice(0, 12), id: me.id, name: me.name, team: me.team ?? 0 };
         if (m.op === 'ask') out.need = (Array.isArray(m.need) ? m.need : []).filter((x) => typeof x === 'string').slice(0, 4).map((x) => x.slice(0, 16));
+        if (m.op === 'ask' && m.k === 'save') { out.k = 'save'; out.a = Math.max(1, Math.min(50, Math.floor(Number(m.a)) || 1)); }
         if (m.op === 'cancel' && m.why === 'time') out.why = 'time';
+        this.broadcast(out, ws);
+        return;
+      }
+      case 'save': { // Speicher-Item benutzt: Punkt merken (2 je Akt, bei 2 gegen 2 je Team)
+        if (!me.id) return;
+        const sv = cleanSave(m);
+        if (!sv) return;
+        const ms = await this.modeState();
+        const team = me.team ?? 0;
+        let st;
+        if (ms.mode === 'teams') {
+          const all = (await this.ctx.storage.get('tsave')) || [null, null];
+          st = new SaveState(all[team]);
+          if (!st.place(sv)) { this.send(ws, { t: 'saveSync', save: st.toJSON(), team }); return; }
+          all[team] = st.toJSON();
+          await this.ctx.storage.put('tsave', all);
+        } else {
+          st = new SaveState(await this.ctx.storage.get('save'));
+          if (!st.place(sv)) { this.send(ws, { t: 'saveSync', save: st.toJSON() }); return; }
+          await this.ctx.storage.put('save', st.toJSON());
+        }
+        const out = { t: 'save', id: me.id, name: me.name, save: st.toJSON() };
+        if (ms.mode === 'teams') out.team = team;
         this.broadcast(out, ws);
         return;
       }
@@ -310,12 +339,14 @@ export class Room extends DurableObject {
           // Revanche: beide Teams wieder unten, neue Rennuhr
           const race = { startedAt: Date.now(), winner: null };
           await this.ctx.storage.put({ tcp: [0, 0], race, flags: [] });
+          await this.ctx.storage.delete('tsave');
           this.machOcc.clear(); this.machState.clear();
           this.broadcast({ t: 'restart', by: me.name, startedAt: race.startedAt, race });
           return;
         }
         const startedAt = Date.now();
         await this.ctx.storage.put({ startedAt, played: 0, cp: 0, flags: [] });
+        await this.ctx.storage.delete('save');
         this.machOcc.clear(); this.machState.clear();
         this.broadcast({ t: 'restart', by: me.name, startedAt });
         return;
@@ -335,17 +366,19 @@ export class Room extends DurableObject {
           teams = assignTeams(all, m.shuffle ? Math.random : null);
           race = { startedAt: Date.now(), winner: null };
           await this.ctx.storage.put({ mode, tcp: [0, 0], race });
+          await this.ctx.storage.delete('tsave');
         } else {
           for (const p of all) teams[p.id] = 0;
           await this.ctx.storage.put('mode', mode);
-          await this.ctx.storage.delete(['tcp', 'race']);
+          await this.ctx.storage.delete(['tcp', 'race', 'tsave']);
         }
         for (const p of all) {
           const { ws: sock, ...a } = p;
           sock.serializeAttachment({ ...a, team: teams[p.id] });
         }
         const cp = (await this.ctx.storage.get('cp')) || 0;
-        this.broadcast({ t: 'mode', mode, teams, race, cp, by: me.name, shuffle: !!m.shuffle });
+        const save = mode === 'teams' ? null : (await this.ctx.storage.get('save')) || null;
+        this.broadcast({ t: 'mode', mode, teams, race, cp, save, by: me.name, shuffle: !!m.shuffle });
         return;
       }
     }

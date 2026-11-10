@@ -252,6 +252,7 @@ export class Sfx {
   join() { this._chime([67, 71, 74, 79]); }
   leave() { this._chime([74, 70, 67], { gap: 0.12 }); }
   toast() { this._chime([79], { d: 0.15, peak: 0.08, type: 'sine', vol: 0.3 }); }
+  save() { this._chime([72, 79, 84], { gap: 0.07, d: 0.22, type: 'sine', vol: 0.4 }); }
   mute() { this._chime([72, 67], { gap: 0.07, d: 0.1, type: 'square', vol: 0.25 }); }
 
   emote(o = {}) {
