@@ -1287,7 +1287,30 @@ class Game {
   // Speicherpunkt, an dem lp gerade wieder einsteigt (null = Zwischenstopp)
   activeSave(lp) {
     const st = this.saveOf(lp);
-    return st.active(this.cpOf(lp)) ? st.pt : null;
+    if (!st.active(this.cpOf(lp))) return null;
+    if (!this.standable(st.pt.pos)) this.relocateSave(st);
+    return st.pt;
+  }
+
+  // Die Karte hat sich geändert (neue Version): der Speicherpunkt hängt in der Luft.
+  // Neu setzen auf die am weitesten erreichte feste Plattform zwischen seinem Zwischenstopp
+  // und dem nächsten, die nicht höher liegt als der alte Punkt.
+  relocateSave(st) {
+    const L = this.level, path = L.path, pt = st.pt;
+    const cp = L.checkpoints[pt.i], next = L.checkpoints[pt.i + 1];
+    const i0 = Math.max(0, path.findIndex((q) => q.box === cp?.box));
+    const i1 = next ? path.findIndex((q) => q.box === next.box) : path.length;
+    let best = null;
+    for (let i = i0 + 1; i < (i1 > i0 ? i1 : path.length); i++) {
+      const b = path[i].box;
+      if (!b || path[i].kind !== 'static' || b.max[1] > pt.pos[1] + 0.5) continue;
+      if (b.mover || b.machine || b.crumble || b.blink || b.ramp || b.round || b.slide || b.belt || b.ice || b.big) continue;
+      const q = [(b.min[0] + b.max[0]) / 2, b.max[1] + 0.05, (b.min[2] + b.max[2]) / 2];
+      if (this.standable(q)) best = q;
+    }
+    if (best) pt.pos = best.map((v) => Math.round(v * 100) / 100);
+    else st.pt = null; // nichts Passendes: zurück zum Zwischenstopp
+    this.storeSave();
   }
 
   spawnLabel(lp) {
