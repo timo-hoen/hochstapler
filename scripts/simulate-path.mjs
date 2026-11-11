@@ -112,7 +112,7 @@ for (let i = 1; i < level.path.length; i++) {
       if (body.zapped) { ok = false; break; }
       if (body.bounced === tb && steering) { ok = true; break; }
       if (B.special === 'fan' && body.inFan && world.zoneAt(body.pos) === B.zone) { ok = true; break; }
-      if (jumped && s > 10 && body.grounded && (steering || body.ground !== a)) { ok = body.ground === tb; if (ok || !A.special || (A.special !== 'slide' && A.special !== 'ramp' && A.special !== 'round')) break; }
+      if (jumped && s > 10 && body.grounded && (steering || body.ground !== a)) { ok = body.ground === tb || overPress(A, B, body.ground); if (ok || !A.special || (A.special !== 'slide' && A.special !== 'ramp' && A.special !== 'round')) break; }
     }
   if (ok) break;
   }
@@ -132,6 +132,10 @@ function hazardAhead(body, dir) {
     if (lat && ahead > 0 && ahead < 0.9) return true;
   }
   return false;
+}
+// Stanzpressen: vom Podest springt man oben auf den ersten Stempel – das ist der Weg obendrüber
+function overPress(A, B, g) {
+  return A.piece === 'presses' && B.piece === 'presses' && B.box.max[1] < A.box.max[1] - 1 && g && g.mover && g.mover.kind === 'press';
 }
 function tc0(b) { return b.max[1].toFixed(1); }
 console.log(`${tested - fails}/${tested} Übergänge geschafft`);

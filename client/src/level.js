@@ -38,6 +38,14 @@ export function punchProgress(u) {
   if (u < 0.72) return 1;
   return 1 - smooth((u - 0.72) / 0.28);
 }
+// Stanzpresse: länger oben in Ruhe (man springt von Stempel zu Stempel), dann Stoß,
+// kurz unten, gleichmäßig wieder hoch (wer oben steht, fährt mit).
+export function pressProgress(u) {
+  if (u < 0.58) return 0;
+  if (u < 0.65) return smooth((u - 0.58) / 0.07);
+  if (u < 0.74) return 1;
+  return 1 - smooth((u - 0.74) / 0.26);
+}
 export function phaseOf(period, phase, t) {
   return (((t / period) + phase) % 1 + 1) % 1;
 }
@@ -45,7 +53,7 @@ export function phaseOf(period, phase, t) {
 // Versatz eines beweglichen Elements zum Zeitpunkt t (Sekunden, Serverzeit).
 export function moverOffset(m, t, out) {
   const u = phaseOf(m.period, m.phase, t);
-  const s = m.profile === 'punch' ? punchProgress(u) : moverProgress(u);
+  const s = m.kind === 'press' ? pressProgress(u) : m.profile === 'punch' ? punchProgress(u) : moverProgress(u);
   out[0] = m.delta[0] * s;
   out[1] = m.delta[1] * s - (m.kind === 'swing' ? m.dip * Math.sin(Math.PI * s) : 0);
   out[2] = m.delta[2] * s;
@@ -321,7 +329,13 @@ export function buildLevel(opts = {}) {
       dip: 0, mat: o.mat || 'lift', sec, side: dirVec('r'), ram: true, profile: 'punch',
     };
     movers.push(m);
-    solids.push({ min: min.map((v, i) => Math.min(v, v + delta[i])), max: max.map((v, i) => Math.max(v, v + delta[i])) });
+    const sweep = { min: min.map((v, i) => Math.min(v, v + delta[i])), max: max.map((v, i) => Math.max(v, v + delta[i])) };
+    solids.push(sweep);
+    // Presse: oben auf dem Stempel muss man stehen können (Kopfraum frei halten)
+    if (o.clearUp) {
+      const P = 0.35;
+      clears.push({ min: [sweep.min[0] - P, sweep.max[1], sweep.min[2] - P], max: [sweep.max[0] + P, sweep.max[1] + o.clearUp, sweep.max[2] + P] });
+    }
     return m;
   }
 

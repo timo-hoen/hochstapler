@@ -12,13 +12,16 @@ function center(b) {
 }
 
 // Bewegungsphase: 0 halten, 1 hin, 2 halten, 3 zurück – und Geschwindigkeit 0..1
+// Grenzen je Bewegungsprofil (wie in level.js): Plattform, Rammbock, Stanzpresse
+const SEGS = { move: [0.2, 0.5, 0.7], punch: [0.5, 0.6, 0.72], press: [0.58, 0.65, 0.74] };
 function phaseOf(m, t) {
   const u = (((t / m.period) + m.phase) % 1 + 1) % 1;
+  const [a, b, c] = SEGS[m.kind === 'press' ? 'press' : m.profile === 'punch' ? 'punch' : 'move'];
   let seg = 0, x = 0;
-  if (u < 0.2) seg = 0;
-  else if (u < 0.5) { seg = 1; x = (u - 0.2) / 0.3; }
-  else if (u < 0.7) seg = 2;
-  else { seg = 3; x = (u - 0.7) / 0.3; }
+  if (u < a) seg = 0;
+  else if (u < b) { seg = 1; x = (u - a) / (b - a); }
+  else if (u < c) seg = 2;
+  else { seg = 3; x = (u - c) / (1 - c); }
   const speed = seg === 1 || seg === 3 ? 6 * x * (1 - x) / 1.5 : 0;
   return { seg, speed, s: moverProgress(u) };
 }

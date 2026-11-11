@@ -52,6 +52,8 @@ export const ACTS = [
 ];
 
 // Richtung → Abmessungen (along = entlang der Laufrichtung, across = quer)
+// Stanzpresse: Hub und Dicke der Stempelplatte (unter dem Stempel in Ruhe bleiben 0,5 m über dem Kopf)
+export const PRESS_HUB = 2.3, PRESS_PLATE = 0.6;
 const dims = (dir, along, across) => (dir === 'f' || dir === 'b' ? [along, across] : [across, along]);
 
 export function buildActs(k) {
@@ -388,15 +390,23 @@ export function buildActs(k) {
       }
       S('f', R(1.0, 1.3), R(0.0, 0.4), 2.0, 2.0, T.mats[0], { exact: true });
     },
-    presses(T, g) { // Stanzpressen: kleine Tritte unter Stempeln, die herunterknallen
-      const period = R(2.8, 3.4) - 0.4 * g;
+    presses(T, g) { // Stanzpressen: Tritte unter Stempeln, die herunterknallen
+      // Zwei Wege: unten zwischen den Stößen durch – oder oben über die Stempel. Ein Podest
+      // vorn liegt so hoch, dass man auf den ersten Stempel springen kann; die Stempel sind
+      // flache Platten, die Oberseiten liegen fast gleich hoch und man fährt auf ihnen mit.
+      // Alle Pressen einer Reihe stoßen im selben Takt: eine Seilschaft hat ein gemeinsames Fenster.
+      const period = R(3.0, 3.5) - 0.3 * g;
       const n = 3 + (rnd() < 0.3 + 0.5 * g ? 1 : 0);
+      const phase = rnd();
+      S('f', R(1.2, 1.5), R(0.2, 0.6), 1.8, 1.8, 'machine', { exact: true, supports: true }); // Podest
+      k.sign('STANZPRESSEN');
       for (let i = 0; i < n; i++) {
-        const s = 1.3 - 0.2 * g;
-        const b = S('f', R(1.3, 1.7 + 0.3 * g), R(-0.2, 0.5), s, s, 'machine', { exact: true, h: R(1.2, 2.0), supports: true });
-        if (i === 0) k.sign('STANZPRESSEN');
-        const top = b.max[1] + 2.75;
-        k.pusher([b.min[0] - 0.05, top, b.min[2] - 0.05], [b.max[0] + 0.05, top + 1.1, b.max[2] + 0.05], [0, -2.75, 0], { press: true, period, phase: (0.15 * i) % 1 });
+        const s = 1.4 - 0.15 * g;
+        // erster Tritt tief unter dem Podest, danach fast eben (oben springt man von Stempel zu Stempel)
+        const dy = i === 0 ? -(PRESS_HUB + PRESS_PLATE - R(0.85, 1.05)) : R(-0.15, 0.25);
+        const b = S('f', R(1.3, 1.6 + 0.2 * g), dy, s, s, 'machine', { exact: true, h: R(1.2, 2.0), supports: true });
+        const top = b.max[1] + PRESS_HUB;
+        k.pusher([b.min[0] - 0.05, top, b.min[2] - 0.05], [b.max[0] + 0.05, top + PRESS_PLATE, b.max[2] + 0.05], [0, -PRESS_HUB, 0], { press: true, period, phase, clearUp: 2.3 });
       }
       S('f', R(1.2, 1.6), R(0.2, 0.6), 2.0, 2.0, T.mats[1], { exact: true });
     },

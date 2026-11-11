@@ -599,9 +599,23 @@ export class Renderer {
             cylMin[i] = b.min[i] + c[i] - w; cylMax[i] = b.min[i] + c[i] + w;
           }
         }
-        const rod = new THREE.Mesh(boxGeo(rodMin, rodMax, 1), this.mm.machine);
-        rod.castShadow = true;
-        g.add(rod);
+        if (m.kind === 'press') {
+          // Presse: oben steht man auf dem Stempel – statt einer Stange in der Mitte
+          // zwei Führungsstangen an den Seiten (quer zur Laufrichtung), Zylinder als Querhaupt
+          const j = m.side && m.side[0] ? 0 : 2;
+          for (const sg of [1, -1]) {
+            const a = [...rodMin], z = [...rodMax];
+            a[j] = c[j] + sg * (half[j] - 0.12) - r; z[j] = c[j] + sg * (half[j] - 0.12) + r;
+            const rod = new THREE.Mesh(boxGeo(a, z, 1), this.mm.machine);
+            rod.castShadow = true;
+            g.add(rod);
+          }
+          cylMin[j] = b.min[j] - 0.05; cylMax[j] = b.max[j] + 0.05;
+        } else {
+          const rod = new THREE.Mesh(boxGeo(rodMin, rodMax, 1), this.mm.machine);
+          rod.castShadow = true;
+          g.add(rod);
+        }
         this.addDecorBox(cylMin, cylMax, this.mm.machine);
         this.pusherFrame(m, b, cylMin, cylMax, u);
       }

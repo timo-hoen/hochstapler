@@ -93,5 +93,104 @@ ok(p.tried > 20 && p.shoved === p.tried && p.fell === p.tried, `Stanzpressen: ${
   ok(!thin.length, `harte Passagen in allen Akten 2–7 (${[...acts].map(([a, s]) => `Akt ${a}: ${s.size}`).join(', ')})`);
 }
 
+// Stanzpressen obendrüber: vom Podest auf den ersten Stempel, von Stempel zu Stempel,
+// oben mitfahren, Kante greifen. Alle Pressen einer Reihe stoßen im selben Takt.
+{
+  const presses = level.movers.filter((m) => m.kind === 'press');
+  const box = (m) => world.moverBoxes[level.movers.indexOf(m)];
+  const rows = [];
+  for (const m of presses) {
+    const r = rows.find((x) => x.sec === m.sec && x.period === m.period && Math.abs(x.ms[x.ms.length - 1].base.min[1] - m.base.min[1]) < 1.5);
+    if (r && r.ms.length < 4) r.ms.push(m); else rows.push({ sec: m.sec, period: m.period, ms: [m] });
+  }
+  ok(rows.every((r) => r.ms.every((m) => m.phase === r.ms[0].phase)), `Pressen einer Reihe im selben Takt (${rows.length} Reihen)`);
+  // Sprung von Box a zur Mitte von Box b (Anlauf von hinten, Absprung an der Kante, Luftsteuerung)
+  function hop(a, b, t) {
+    const ac = [(a.min[0] + a.max[0]) / 2, a.max[1], (a.min[2] + a.max[2]) / 2];
+    const bc = () => [(b.min[0] + b.max[0]) / 2, b.max[1], (b.min[2] + b.max[2]) / 2];
+    const c0 = bc(), dx = c0[0] - ac[0], dz = c0[2] - ac[2];
+    const dir = Math.abs(dx) > Math.abs(dz) ? [Math.sign(dx), 0] : [0, Math.sign(dz)];
+    const half = dir[0] ? (a.max[0] - a.min[0]) / 2 : (a.max[2] - a.min[2]) / 2;
+    const body = createBody([ac[0] - dir[0] * (half - 0.35), ac[1] + 0.01, ac[2] - dir[1] * (half - 0.35)]);
+    body.grounded = true; body.ground = a;
+    let jumped = false;
+    for (let s = 0; s < 120 * 3; s++) {
+      t += dt; world.update(t);
+      let ix = dir[0], iz = dir[1], jump = false;
+      const out = dir[0] ? (dir[0] > 0 ? body.pos[0] + 0.3 - a.max[0] : a.min[0] - (body.pos[0] - 0.3)) : (dir[1] > 0 ? body.pos[2] + 0.3 - a.max[2] : a.min[2] - (body.pos[2] - 0.3));
+      if (!jumped && out > 0.1 && body.grounded) { jump = true; jumped = true; }
+      if (jumped && !jump) { const c = bc(); const tx = c[0] - body.pos[0], tz = c[2] - body.pos[2], l = Math.hypot(tx, tz); const k2 = Math.min(1, l * 0.8) / Math.max(l, 1e-6); ix = tx * k2; iz = tz * k2; }
+      stepBody(body, { x: ix, z: iz, jump, brace: false }, world, dt);
+      if (jumped && s > 10 && body.grounded) return { ok: body.ground === b, body, t };
+    }
+    return { ok: false, body, t };
+  }
+  let exitOk = 0, exitN = 0, pod = 0, podN = 0, across = 0, acrossN = 0, ride = 0, rideN = 0;
+  for (const r of rows) {
+    const m0 = r.ms[0];
+    const t0 = timeAt(m0, 0.03); // Ruhe beginnt gerade
+    world.t = null; world.update(t0);
+    // Podest: statische Fläche direkt vor dem ersten Tritt, knapp unter dem ersten Stempel
+    const s0 = platformOf(m0), b0 = box(m0);
+    const i0 = level.path.findIndex((q) => q.box === s0);
+    const podest = i0 > 0 ? level.path[i0 - 1].box : null;
+    if (podest && podest.max[1] > s0.max[1] + 1) {
+      podN++;
+      world.t = null; world.update(t0);
+      if (hop(podest, b0, t0).ok) pod++; else if (process.env.DBG) console.log('Podest → Stempel', presses.indexOf(m0));
+    }
+    for (let i = 0; i + 1 < r.ms.length; i++) {
+      acrossN++;
+      world.t = null; world.update(t0);
+      if (hop(box(r.ms[i]), box(r.ms[i + 1]), t0).ok) across++; else if (process.env.DBG) console.log('Stempel → Stempel', presses.indexOf(r.ms[i]));
+    }
+    // Vom letzten Stempel hinunter auf die Ausstiegsfläche
+    {
+      const last = r.ms[r.ms.length - 1], sl = platformOf(last);
+      const il = level.path.findIndex((q) => q.box === sl);
+      const exit = il >= 0 ? level.path[il + 1]?.box : null;
+      if (exit && exit.max[1] < box(last).max[1] && !exit.mover) {
+        exitN++;
+        world.t = null; world.update(t0);
+        if (hop(box(last), exit, t0).ok) exitOk++; else if (process.env.DBG) console.log('Stempel → Ausstieg', presses.indexOf(last));
+      }
+    }
+    // Oben stehen bleiben: ein ganzer Takt (Stoß und Hochfahren), man fährt mit und bleibt oben
+    {
+      rideN++;
+      let t = t0; world.t = null; world.update(t);
+      const b = box(m0);
+      const body = createBody([(b.min[0] + b.max[0]) / 2, b.max[1] + 0.01, (b.min[2] + b.max[2]) / 2]);
+      body.grounded = true; body.ground = b;
+      for (let s = 0; s < 120 * m0.period * 1.2; s++) { t += dt; world.update(t); stepBody(body, { x: 0, z: 0, jump: false, brace: false }, world, dt); }
+      if (body.grounded && body.ground === b && Math.abs(body.pos[1] - b.max[1]) < 0.05) ride++;
+    }
+  }
+  ok(podN > 10 && pod === podN, `Podest → erster Stempel: ${pod}/${podN} Sprünge gelandet`);
+  ok(acrossN > 20 && across === acrossN, `Stempel → Stempel: ${across}/${acrossN} Sprünge gelandet`);
+  ok(exitN > 10 && exitOk === exitN, `letzter Stempel → Ausstieg: ${exitOk}/${exitN} Sprünge gelandet`);
+  ok(rideN > 10 && ride === rideN, `oben auf dem Stempel durch einen ganzen Takt mitgefahren: ${ride}/${rideN}`);
+
+  // Kantengriff: am ruhenden Stempel hängen, beim Losfahren loslassen
+  {
+    const m = rows[0].ms[1];
+    const b = box(m);
+    let t = timeAt(m, 0.03); world.t = null; world.update(t);
+    const s = m.side; // quer zur Laufrichtung: zur Seite hin hängen
+    const ax = s[0] ? 0 : 2, sg = 1;
+    const p = [(b.min[0] + b.max[0]) / 2, b.max[1] - 1.6, (b.min[2] + b.max[2]) / 2];
+    p[ax] = (sg > 0 ? b.max[ax] + 0.31 : b.min[ax] - 0.31);
+    const body = createBody(p);
+    body.grounded = false; body.vel[1] = -0.5;
+    const inp = { x: ax === 0 ? -sg : 0, z: ax === 2 ? -sg : 0, jump: false, brace: false };
+    let hung = false;
+    for (let k2 = 0; k2 < 30; k2++) { t += dt; world.update(t); stepBody(body, inp, world, dt); if (body.hang) { hung = true; break; } }
+    ok(hung && body.hang.box === b, 'Kante eines ruhenden Stempels greifbar');
+    let let0 = false;
+    for (let k2 = 0; k2 < 120 * m.period && hung; k2++) { t += dt; world.update(t); stepBody(body, { x: 0, z: 0, jump: false, brace: false }, world, dt); if (!body.hang) { let0 = true; break; } }
+    ok(let0 && phaseOf(m.period, m.phase, t) > 0.5, 'fährt der Stempel los, lässt man los');
+  }
+}
+
 if (fails) { console.log(`${fails} Fehler`); process.exit(1); }
 console.log('✓ Harte Passagen ok');

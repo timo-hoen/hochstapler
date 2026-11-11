@@ -395,6 +395,9 @@ function freeAt(p, cols) {
   return true;
 }
 
+// Stanzpresse oben in Ruhe: Stempelkante greifbar (fährt sie los, lässt man los)
+const pressAtRest = (b) => b.mover.kind === 'press' && b.off[1] === 0 && b.d[1] === 0;
+
 // Von der Kante hoch auf die Plattform (Sprung oder vom Mitspieler am Seil drüber gezogen)
 function climbOver(body, cols) {
   const g = body.hang, n = g.n;
@@ -410,6 +413,7 @@ function climbOver(body, cols) {
 // An einer Kante hängen: festhalten, Sprung = hochziehen, weg drücken = loslassen
 function stepHang(body, input, cols) {
   const g = body.hang;
+  if (g.box.mover && !pressAtRest(g.box)) { body.hang = null; body.braced = false; body.gripCool = 0.4; return; }
   body.vel[0] = body.vel[1] = body.vel[2] = 0;
   body.braced = true;
   const n = g.n; // Richtung zur Wand
@@ -543,7 +547,7 @@ function grabLedge(body, input, world, hx, hz) {
     near = near || world.near(p, 2).slice();
     const cands = [];
     for (const b of near) {
-      if (b.mover || b.ramp || b.round || b.blink || b.nogrip || b.hidden) continue;
+      if ((b.mover && !pressAtRest(b)) || b.ramp || b.round || b.blink || b.nogrip || b.hidden) continue;
       const rel = b.max[1] - p[1];
       if (rel < PHYS.ledgeMin || rel > PHYS.pullMax) continue;
       const gap = s > 0 ? b.min[ax] - (p[ax] + h) : (p[ax] - h) - b.max[ax];
@@ -897,7 +901,7 @@ function hoistGrab(body, nx, nz, world) {
   const p = body.pos, h = PHYS.half[0];
   // Kopie: freeAt fragt world.near erneut ab (gemeinsames Array)
   for (const b of world.near(p, 2).slice()) {
-    if (b.mover || b.ramp || b.round || b.blink || b.nogrip || b.hidden) continue;
+    if ((b.mover && !pressAtRest(b)) || b.ramp || b.round || b.blink || b.nogrip || b.hidden) continue;
     const rel = b.max[1] - p[1];
     if (rel < PHYS.ledgeMin || rel > PHYS.ledgeMax) continue;
     const gap = s > 0 ? b.min[ax] - (p[ax] + h) : (p[ax] - h) - b.max[ax];
