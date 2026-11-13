@@ -28,10 +28,22 @@ export class MachineControl {
   localById(id) { return this.g.locals.find((l) => l.id === id); }
   isLocalId(id) { return !!this.localById(id); }
 
-  // Rechnet dieses Gerät die Maschine? (Besetzer des ersten besetzten Platzes ist lokal)
+  // Rechnet dieses Gerät die Maschine? Besetzt: der Besetzer des ersten besetzten Platzes.
+  // Unbesetzt rechnet der Gastgeber (niedrigster Slot im Raum) das passive Verhalten
+  // (Rückruf, Absinken, Zurückrollen) und schickt es an alle – sonst rechnet jedes Gerät
+  // für sich und die Maschine steht bei jedem woanders.
   authority(m) {
     const first = m.occ.find((o) => o);
-    return first ? this.isLocalId(first) : false;
+    if (first) return this.isLocalId(first);
+    return this.isHost();
+  }
+
+  isHost() {
+    if (!this.g.net?.online || !this.g.remotes.size) return true;
+    let best = null;
+    for (const l of this.g.locals) if (!best || (l.slot ?? 99) < best.slot) best = { slot: l.slot ?? 99, local: true };
+    for (const r of this.g.remotes.values()) if (!best || (r.slot ?? 99) < best.slot) best = { slot: r.slot ?? 99, local: false };
+    return !!best?.local;
   }
 
   // ───── Benutzen ─────
@@ -83,10 +95,17 @@ export class MachineControl {
     lp.station = null;
     if (s.m.occ[s.st] === lp.id) s.m.occ[s.st] = null;
     lp.body.braced = false;
+    // Auf der Plattform stehen bleiben: Boden ist die Maschine, auf der man saß
+    lp.body.ground = s.m.boxes[0];
+    lp.body.grounded = true;
     const net = lp.net?.online ? lp.net : null;
+    // Wer gerechnet hat, schickt zuerst den letzten Stand (die anderen übernehmen ihn,
+    // bevor sie die Maschine selbst rechnen), dann die Freigabe des Platzes
+    if (net && s.m.wasAuth) net.send({ t: 'ms', m: s.m.id, s: s.m.pack() });
     net?.send({ t: 'mr', m: s.m.id, st: s.st });
-    // Autorität abgegeben: letzten Stand an alle
-    if (net) net.send({ t: 'ms', m: s.m.id, s: s.m.pack() });
+    // Dieses Gerät rechnet jetzt evtl. nicht mehr: am eigenen Stand festhalten, bis der
+    // nächste Zustand kommt (sonst springt die Plattform zu einem alten Stand und man fällt durch)
+    this.syncAuth(s.m);
     if (!quiet) audio.play('uiBack');
   }
 
@@ -153,6 +172,8 @@ export class MachineControl {
       const s = st.st?.[mc.id];
       if (s) { mc.unpack(s); if (mc.target) mc.packKeys().forEach((k, i) => { mc.s[k] = mc.target[i]; }); }
       mc.apply();
+      for (const b of mc.boxes) b.fresh = true; // kein Mitfahr-Ruck durch den Sprung
+      mc.wasAuth = this.authority(mc);
     }
     for (const f of m.flags || []) this.setFlag(f, true);
   }
@@ -188,12 +209,27 @@ export class MachineControl {
     return out;
   }
 
+  // Wechsel der rechnenden Seite sauber übergeben:
+  // - abgegeben: den eigenen Stand als Ziel halten, bis der neue Rechner sendet
+  // - übernommen: beim letzten bekannten Stand weiterrechnen (nicht beim geglätteten)
+  syncAuth(mc) {
+    const auth = this.authority(mc);
+    if (mc.wasAuth === undefined) mc.wasAuth = auth;
+    if (mc.wasAuth && !auth) mc.target = mc.pack();
+    else if (!mc.wasAuth && auth && mc.target) {
+      mc.packKeys().forEach((k, i) => { mc.s[k] = mc.target[i]; });
+      mc.target = null;
+    }
+    mc.wasAuth = auth;
+    return auth;
+  }
+
   // Maschinen einen Schritt rechnen (vor den Spielern)
   step(dt, first, feet) {
     const solo = this.solo();
     this.world.solo = solo;
     for (const mc of this.list) {
-      const auth = this.authority(mc);
+      const auth = this.syncAuth(mc);
       const ins = mc.occ.map((id, i) => {
         if (!id) return null;
         const lp = this.localById(id);
@@ -246,12 +282,26 @@ export class MachineControl {
       for (const e of mc.events) audio.play(e === 'pump' ? 'clunk' : e === 'bump' ? 'land' : 'clunk', { pos: mc.boxes[0].max, speed: 6, remote: true });
       mc.events.length = 0;
       if (!send) continue;
-      // Autorität: Zustand an alle. Andere Bediener: Eingaben an die Autorität
+      const auth = this.authority(mc);
+      // Autorität: Zustand an alle – bedient 20-mal je Sekunde, unbesetzt (Gastgeber) nur bei
+      // Änderung und sonst einmal je Sekunde
+      if (auth) {
+        const first = mc.occ.find((o) => o);
+        const net = (first && this.localById(first)?.net) || this.g.net;
+        if (net?.online) {
+          const st = mc.pack(), key = st.join();
+          const now = performance.now();
+          if (first || key !== mc.sentKey || now - (mc.sentAt || 0) > 1000) {
+            net.send({ t: 'ms', m: mc.id, s: st });
+            mc.sentKey = key; mc.sentAt = now;
+          }
+        }
+      }
+      // Andere Bediener: Eingaben an die Autorität
       mc.occ.forEach((id, i) => {
         const lp = id && this.localById(id);
         if (!lp || !lp.net?.online) return;
-        if (this.authority(mc) && mc.occ.find((o) => o) === id) lp.net.send({ t: 'ms', m: mc.id, s: mc.pack() });
-        else if (!this.authority(mc)) {
+        if (!auth) {
           const i0 = lp.mIn || NO_INPUT;
           lp.net.send({ t: 'mi', m: mc.id, st: i, i: { x: r3(i0.x), z: r3(i0.z), fx: r3(i0.fx), rx: r3(i0.rx), up: i0.up, down: i0.down, j: lp.pumps || 0 } });
         }
