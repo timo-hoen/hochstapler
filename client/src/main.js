@@ -380,6 +380,8 @@ class Game {
         if (!m.g) r.airVy = Math.min(r.airVy || 0, m.v[1]);
         else if (!r.grounded) { audio.remoteLand(m.p, -(r.airVy || 0)); r.airVy = 0; }
         r.target = m.p; r.vel = m.v; r.yaw = m.y; r.grounded = m.g; r.braced = m.b; r.a = m.a;
+        // Steht er auf einer Maschine oder beweglichen Plattform: Lage relativ dazu
+        r.rel = this.relRef(m.r);
         r.age = 0;
         if (!r.rpos) r.rpos = [...m.p];
         // Respawn des Mitspielers: sofort dort hinspringen (nicht durch die Luft gleiten,
@@ -467,13 +469,30 @@ class Game {
     }
   }
 
+  // Bezugsbox fürs Mitfahren übers Netz: [0, i] = Maschinenteil, [1, i] = bewegliche Plattform
+  refOf(box) {
+    if (!box) return null;
+    if (box.machine) { const i = this.world.dyn.indexOf(box); return i >= 0 ? [0, i] : null; }
+    if (box.mover) { const i = this.world.moverBoxes.indexOf(box); return i >= 0 ? [1, i] : null; }
+    return null;
+  }
+  relRef(r) {
+    if (!Array.isArray(r) || r.length !== 5 || !r.every(Number.isFinite)) return null;
+    const box = r[0] === 0 ? this.world.dyn[r[1]] : r[0] === 1 ? this.world.moverBoxes[r[1]] : null;
+    return box ? { box, o: [r[2], r[3], r[4]] } : null;
+  }
+  // Mitte der Oberseite (bei gedrehten Teilen die Mitte der Hülle; die bleibt beim Drehen gleich)
+  anchorOf(b) {
+    return [(b.min[0] + b.max[0]) / 2, b.max[1], (b.min[2] + b.max[2]) / 2];
+  }
+
   addRemote(p) {
     if (this.remotes.has(p.id) || this.isLocal(p.id)) return;
     const s = p.s || {};
     const r = {
       id: p.id, name: p.name, slot: p.slot, color: p.color, team: p.team ?? 0,
       target: s.p || [...this.level.spawn], rpos: s.p ? [...s.p] : [...this.level.spawn],
-      vel: s.v || [0, 0, 0], yaw: s.y || 0, grounded: s.g ?? true, braced: s.b || false, a: s.a, age: 0, maxY: 0,
+      vel: s.v || [0, 0, 0], yaw: s.y || 0, grounded: s.g ?? true, braced: s.b || false, a: s.a, age: 0, maxY: 0, rel: this.relRef(s.r),
     };
     this.remotes.set(p.id, r);
     this.view.createAvatar(p.id, p.name, p.color);
@@ -876,6 +895,14 @@ class Game {
       r.age += dt;
       if (r.hidden > 0) r.hidden -= dt;
       if (r.slack > 0) r.slack -= dt;
+      // Auf Maschine/beweglicher Plattform: mit der Plattform, wie sie hier steht, mitfahren
+      // (sonst schwebt er neben dem Deck, weil seine Plattform beim ihm woanders steht)
+      if (r.rel) {
+        const a = this.anchorOf(r.rel.box);
+        r.target = [a[0] + r.rel.o[0], a[1] + r.rel.o[1], a[2] + r.rel.o[2]];
+        if (r.relBox === r.rel.box && r.relLast) for (let i = 0; i < 3; i++) r.rpos[i] += a[i] - r.relLast[i];
+        r.relBox = r.rel.box; r.relLast = a;
+      } else r.relBox = r.relLast = null;
       // Teleport (Neustart, Zwischenstopp): springen statt quer durchs Bild zu gleiten
       if (Math.hypot(r.target[0] - r.rpos[0], r.target[1] - r.rpos[1], r.target[2] - r.rpos[2]) > 8) r.rpos = [...r.target];
       const lead = Math.min(r.age, 0.15);
@@ -921,7 +948,13 @@ class Game {
       const r2 = (v) => Math.round(v * 100) / 100;
       for (const lp of locals) {
         const b = lp.body;
-        lp.net?.send({ t: 's', p: b.pos.map(r2), v: b.vel.map(r2), y: r2(visYaw(b)), g: b.grounded, b: b.braced, a: animCode(b) | elementBits(b), w: lp.warp });
+        const msg = { t: 's', p: b.pos.map(r2), v: b.vel.map(r2), y: r2(visYaw(b)), g: b.grounded, b: b.braced, a: animCode(b) | elementBits(b), w: lp.warp };
+        const ref = b.grounded && !(lp.dead > 0) ? this.refOf(b.ground) : null;
+        if (ref) {
+          const a = this.anchorOf(b.ground);
+          msg.r = [ref[0], ref[1], r2(b.pos[0] - a[0]), r2(b.pos[1] - a[1]), r2(b.pos[2] - a[2])];
+        }
+        lp.net?.send(msg);
       }
     }
 

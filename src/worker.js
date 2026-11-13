@@ -176,6 +176,8 @@ export class Room extends DurableObject {
       case 's': {
         if (!me.id) return;
         const s = { p: m.p, v: m.v, y: m.y, g: m.g, b: m.b, a: typeof m.a === 'number' ? m.a & 127 : undefined, w: typeof m.w === 'number' ? m.w & 1023 : undefined };
+        // Mitfahren: [Art, Index, dx, dy, dz] relativ zu Maschine/beweglicher Plattform
+        if (Array.isArray(m.r) && m.r.length === 5 && m.r.every((v) => Number.isFinite(v) && Math.abs(v) < 1e4)) s.r = m.r;
         this.lastState.set(me.id, s);
         this.broadcast({ t: 's', id: me.id, ...s }, ws);
         return;

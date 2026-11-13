@@ -96,6 +96,7 @@ class Machine {
       if (!Number.isFinite(t)) return;
       const cur = this.s[key];
       if (key === 'yaw') this.s[key] = cur + wrapPi(t - cur) * k;
+      else if (this.snapKeys?.includes(key)) this.s[key] = t; // Schalterstellungen nicht überblenden
       else if (Math.abs(t - cur) > 6) this.s[key] = t; // Sprung (Rückruf): nicht quer durchs Bild
       else this.s[key] = cur + (t - cur) * k;
     });
@@ -346,6 +347,7 @@ export class Trolley extends Machine {
   }
   home() { return { s: 0, v: 0, ph: -1, pt: 0 }; }
   packKeys() { return ['s', 'v', 'ph']; }
+  get snapKeys() { return ['ph']; }
   deckY(s = this.s.s) {
     const D = this.def;
     const t = clamp((s - D.slope[0]) / (D.slope[1] - D.slope[0]), 0, 1);
